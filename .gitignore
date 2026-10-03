@@ -1,0 +1,13 @@
+# Local tooling / agent scaffolding
+.github/
+.agents/
+.azure/
+
+# Build scratch
+shots/
+*.tmp
+*.log
+
+# Editor
+.vscode/
+Thumbs.db
