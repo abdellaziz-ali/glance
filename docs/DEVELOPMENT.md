@@ -37,7 +37,7 @@ Script mode behaves identically to the exe; the only differences are the process
 
 ## Test
 
-There is a headless smoke test built into the app. It constructs the full UI, samples metrics for ~3.5 s, prints every rendered row and every settings page, and exits 0.
+There is a headless smoke test built into the app. It constructs the full UI, samples metrics for ~3.5 s, prints every rendered row and every settings page, round-trips the default settings through JSON, exercises *Restore defaults*, registers the configured hotkey (if any), and exits 0. Any throw prints `FAILED: ...` and exits 1.
 
 ```powershell
 $env:GLANCE_HEADLESS = '1'
@@ -65,7 +65,9 @@ What the installer touches: `%LocalAppData%\Programs\Glance\`, `Glance.lnk` in t
 - **Threads.** A worker runspace samples metrics and pushes hashtables into a synchronized `Queue`; a 250 ms `DispatcherTimer` on the UI thread drains it. The worker never touches UI objects, and no scriptblocks cross runspaces.
 - **Metrics.** `Win32_PerfFormattedData_*` CIM classes (locale-independent, unlike `Get-Counter`), `NetworkInterface.GetIPStatistics()` deltas for network, `nvidia-smi --query-gpu` when present, otherwise `GPUPerformanceCounters_GPUEngine`. Top process is computed from `TotalProcessorTime` deltas every other tick.
 - **Overlay window.** `WindowStyle=None`, `AllowsTransparency`, `Topmost`, plus `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` so it never takes focus or appears in Alt-Tab. Click-through toggles `WS_EX_TRANSPARENT`. Topmost is re-asserted every 3 s because some full-screen apps steal it.
-- **Settings window.** `WindowChrome` with custom caption; all controls (switch, chip, slider, scrollbar) are restyled `CheckBox` / `RadioButton` / `Slider` templates — no third-party UI library.
+- **Settings.** A flat hashtable serialised with `ConvertTo-Json`, written atomically (temp file + move). `SchemaVersion` is bumped whenever the shape changes; `$Migrations[n]` upgrades a file from version *n* to *n+1* and they run in sequence, so a 2.0 file passes through every step. List-valued keys (`Disks`, `Order`) and map-valued keys (`Colors`, `Icons`, `IconColors`, `Alerts`) are rebuilt as real arrays/hashtables on load because `ConvertFrom-Json` yields `PSCustomObject`s. A file named `portable` next to the exe/script moves the data folder to `data\` beside it.
+- **Metrics window.** Rows are declared once in `$MetricDefs` (id, Show* key, label, owned rows); `Order` stores metric ids and `Apply-Order` re-parents the row grids. Optional readouts (cores, GPU engines, adapter) are only sampled when their `$sync.Want*` flag is on.
+- **Hotkey.** `Glance.HotKeyWindow` (a WinForms `NativeWindow` compiled with `Add-Type`) owns the `RegisterHotKey` call and raises `Pressed` from its `WndProc`; the overlay window itself has no message hook. Full-screen detection compares the foreground window rect with its monitor bounds every second.
 - **Host.** `src\Host.cs` creates a runspace with `UseCurrentThread` on an `[STAThread]` `Main`, so `Application.Run` blocks the main thread as WPF expects. Script errors are logged to `%AppData%\Glance\error.log` and surfaced in a dialog.
 - **Why not IExpress?** It was tried for the installer exe; Defender flags its output (`Program:Win32/Contebrew.A!ml`). A compiled stub has no such problem.
 
@@ -76,3 +78,7 @@ What the installer touches: `%LocalAppData%\Programs\Glance\`, `Glance.lnk` in t
 - `powershell -File` passes arguments literally; `-SetupArgs '/S'` keeps the quotes. The setup stub uses escaped double quotes.
 - The uninstaller's own PowerShell command line contains `Glance`; filter `$PID` out before stopping processes, or it kills itself.
 - `& .\Glance.exe` returns immediately and leaves `$LASTEXITCODE` stale (GUI subsystem). Use `Start-Process -PassThru` and `WaitForExit`.
+- `New-Object System.Windows.Rect($int * $double, ...)` inside a WPF event handler picked the wrong overload and ended the process with no log. Cast the arguments to `[double]` explicitly. `DispatcherUnhandledException` is now handled so UI-handler errors land in `error.log` instead.
+- `Win32_PerfFormattedData_PerfDisk_LogicalDisk` read once per second shows 0 B/s for most of a download because writes reach the disk in cache-flush bursts. Disk rows use the raw class and a ~5 s rolling delta.
+- `Start-Process -Wait` on the installer never returns: it waits for the whole process tree and the installer launches Glance. Use `-PassThru` and `WaitForExit()` on the installer process only.
+- Building a test copy with `-replace`: a replacement string containing `$_` expands to the entire input. Use `[string].Replace()` for literal substitutions.
