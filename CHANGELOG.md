@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.1 — 2026-10-14
+
+- Fixed: the update installer step failed inside the packaged exe (`Get-FileHash` is unavailable in the host runspace); checksums are now computed with .NET directly. 2.4 can see this release but cannot install it from inside the app — install it once by hand, after that updates work.
+- Fixed: a huge negative network rate (and an error badge on the network rows) right after the set of active adapters changed.
+
 ## 2.4 — 2026-10-14
 
 - **Updates** — Settings → About checks GitHub Releases (automatically once a day, or *Check now*), shows a tray notification when a newer version exists, and installs it on request. Downloads are verified against the release's `SHA256SUMS.txt`; portable copies replace themselves in place, installed copies run the setup silently. *Skip this version* and an off switch are available.

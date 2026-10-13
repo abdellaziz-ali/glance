@@ -12,7 +12,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$Version  = '2.4'
+$Version  = '2.4.1'
 $Headless = $env:GLANCE_HEADLESS -eq '1'
 $ShotDir  = $env:GLANCE_SHOT
 $AppExe   = [string]$AppExe                                   # set by the .exe host; empty when run as a script
@@ -218,7 +218,7 @@ $workerScript = {
         }
     } catch {}
 
-    $prevRx = 0L; $prevTx = 0L; $prevT = $null; $prevAdapter = $null
+    $prevRx = 0L; $prevTx = 0L; $prevT = $null; $prevAdapter = $null; $prevNames = ''
     $prevProc = @{}; $prevProcT = $null; $topName = $null; $topPct = 0
     $diskHist = @{}
     $cpuTemp = $null; $thermalOk = $true; $bat = $null; $wifiSignal = $null
@@ -264,13 +264,15 @@ $workerScript = {
                 $sel = @($all | Where-Object { $_.Description -notmatch 'Virtual|VMware|Hyper-V|vEthernet|VirtualBox|Loopback|TAP-|WAN Miniport|Bluetooth' })
                 if ($sel.Count -eq 0) { $sel = $all }
             }
-            if ($prevAdapter -ne $want) { $prevT = $null; $prevAdapter = $want }
             $rx = 0L; $tx = 0L; $names = @()
             foreach ($ni in $sel) { $st = $ni.GetIPStatistics(); $rx += $st.BytesReceived; $tx += $st.BytesSent; $names += $ni.Name }
+            # Reset the delta when the measured adapter set changes, otherwise the first sample is a huge negative rate.
+            if ($prevAdapter -ne $want -or $prevNames -ne ($names -join '|')) { $prevT = $null; $prevAdapter = $want }
+            $prevNames = ($names -join '|')
             $now = $sw.Elapsed.TotalSeconds
             if ($null -ne $prevT) {
                 $dt = $now - $prevT
-                if ($dt -gt 0) { $s.Down = [Math]::Max(0, ($rx - $prevRx) / $dt); $s.Up = [Math]::Max(0, ($tx - $prevTx) / $dt) }
+                if ($dt -gt 0) { $s.Down = [Math]::Max(0.0, ($rx - $prevRx) / $dt); $s.Up = [Math]::Max(0.0, ($tx - $prevTx) / $dt) }
             }
             $prevRx = $rx; $prevTx = $tx; $prevT = $now
             $s.NetNames = $names -join ', '
@@ -1496,7 +1498,9 @@ try {
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     $file = Join-Path $Dir $Asset
     $wc.DownloadFile($base + $Asset, $file)
-    $hash = (Get-FileHash -Path $file -Algorithm SHA256).Hash.ToLowerInvariant()
+    # Get-FileHash lives in the Utility module's script part, which the exe host's runspace does not load.
+    $sha = [System.Security.Cryptography.SHA256]::Create(); $fs = [IO.File]::OpenRead($file)
+    try { $hash = ([BitConverter]::ToString($sha.ComputeHash($fs)) -replace '-', '').ToLowerInvariant() } finally { $fs.Dispose(); $sha.Dispose() }
     if ($hash -ne $sums[$Asset]) { Remove-Item $file -Force -ErrorAction SilentlyContinue; return @{ Error = 'Checksum mismatch - the download was discarded.' } }
     Unblock-File $file -ErrorAction SilentlyContinue
     @{ File = $file }

@@ -13,6 +13,8 @@ $Dist = Join-Path $Root 'dist'
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 
 $Version = (Select-String -Path (Join-Path $Root 'Glance.ps1') -Pattern "^\`$Version\s*=\s*'([^']+)'").Matches[0].Groups[1].Value
+# Assembly attributes need exactly major.minor.build.revision.
+$AsmVersion = (@($Version -split '\.') + @('0', '0', '0'))[0..3] -join '.'
 Write-Host "Building Glance $Version"
 
 $csc = Join-Path $env:windir 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
@@ -65,7 +67,7 @@ function Invoke-Csc([string]$source, [string]$out, [string]$manifest, [string[]]
 
 # ---- 1. Glance.exe (the app)
 $hostCs = Join-Path $work 'Host.cs'
-[IO.File]::WriteAllText($hostCs, (Get-Content (Join-Path $Root 'src\Host.cs') -Raw).Replace('__VERSION__', $Version), [Text.Encoding]::UTF8)
+[IO.File]::WriteAllText($hostCs, (Get-Content (Join-Path $Root 'src\Host.cs') -Raw).Replace('__VERSION__.0.0', $AsmVersion).Replace('__VERSION__', $Version), [Text.Encoding]::UTF8)
 $appExe = Join-Path $Dist 'Glance.exe'
 Remove-Item $appExe -Force -ErrorAction SilentlyContinue
 Invoke-Csc $hostCs $appExe (Join-Path $Root 'src\Glance.manifest') @($sma.FullName, 'System.Windows.Forms.dll') @{ 'Glance.ps1' = (Join-Path $Root 'Glance.ps1') }
@@ -114,7 +116,7 @@ Write-Host ("  {0}  ({1:N0} KB)" -f $cmdPath, ((Get-Item $cmdPath).Length / 1KB)
 
 foreach ($name in $payload.Keys) { [IO.File]::WriteAllBytes((Join-Path $work $name), $payload[$name]) }
 
-$cs = (Get-Content (Join-Path $Root 'installer\SetupStub.cs') -Raw).Replace('__VERSION__', $Version)
+$cs = (Get-Content (Join-Path $Root 'installer\SetupStub.cs') -Raw).Replace('__VERSION__.0.0', $AsmVersion).Replace('__VERSION__', $Version)
 $csPath = Join-Path $work 'SetupStub.cs'
 [IO.File]::WriteAllText($csPath, $cs, [Text.Encoding]::UTF8)
 
