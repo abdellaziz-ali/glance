@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Hide over full-screen apps now only reacts to full-screen windows on the monitor the overlay sits on; a game on another display leaves it visible. Maximized windows with a title bar are no longer mistaken for full-screen.
+
 ## 2.3 — 2026-10-13
 
 ### Added

@@ -23,7 +23,7 @@
 | | |
 |---|---|
 | **Live metrics, 1 s refresh** | CPU %, per-core graph, RAM used / total, GPU % + VRAM + temperature, GPU engines, download / upload speed, adapter + Wi-Fi signal, read / write per drive, top process, uptime, battery |
-| **Always on top, never in the way** | Borderless, semi-transparent (down to fully transparent), never steals focus. Optional **click-through** so the mouse goes straight to whatever is underneath, **auto-hide over full-screen apps**, and a global **show/hide hotkey** |
+| **Always on top, never in the way** | Borderless, semi-transparent (down to fully transparent), never steals focus. Optional **click-through** so the mouse goes straight to whatever is underneath, **auto-hide over full-screen apps** (per monitor), and a global **show/hide hotkey** |
 | **Two layouts** | Floating **panel** with 60-second sparklines and usage tracks, or a slim **bar** - horizontal along the top/bottom edge or vertical along the left/right edge, optionally compact (icons + values only) |
 | **Preset positions** | Snap to any corner or edge of any monitor from a 3×3 picker, or drag it anywhere |
 | **Make it yours** | Reorder metrics, pick which drives to show, per-metric icon (55 glyphs) and colours for icon and text - swatches or any hex, text size, accent colour |

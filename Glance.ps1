@@ -45,6 +45,7 @@ Add-Type -Namespace Glance -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
 [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 public static long GetExStyle(IntPtr h) { return IntPtr.Size == 8 ? GetWindowLongPtr(h, -20).ToInt64() : GetWindowLong32(h, -20); }
+public static long GetStyle(IntPtr h) { return IntPtr.Size == 8 ? GetWindowLongPtr(h, -16).ToInt64() : GetWindowLong32(h, -16); }
 public static void SetExStyle(IntPtr h, long v) { if (IntPtr.Size == 8) SetWindowLongPtr(h, -20, new IntPtr(v)); else SetWindowLong32(h, -20, (int)v); }
 public static string ClassOf(IntPtr h) { var sb = new System.Text.StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString(); }
 '@
@@ -1413,14 +1414,25 @@ function Apply-Hotkey {
     } catch { $script:HotkeyOk = $false; Write-ErrorLog "hotkey '$hk': $_" -Once }
 }
 $script:AutoHidden = $false
-function Test-Fullscreen {
-    $h = [Glance.Native]::GetForegroundWindow(); if ($h -eq [IntPtr]::Zero) { return $false }
+function Get-OverlayScreen {
+    # The overlay may be hidden (auto-hide), so locate it by its last position rather than its handle.
+    $k = 1.0; try { $src = [System.Windows.PresentationSource]::FromVisual($win); if ($src) { $k = $src.CompositionTarget.TransformToDevice.M11 } } catch {}
+    $cx = [int](($win.Left + $win.ActualWidth / 2) * $k); $cy = [int](($win.Top + $win.ActualHeight / 2) * $k)
+    [System.Windows.Forms.Screen]::FromPoint((New-Object System.Drawing.Point($cx, $cy)))
+}
+function Test-Fullscreen([IntPtr]$h = [IntPtr]::Zero) {
+    if ($h -eq [IntPtr]::Zero) { $h = [Glance.Native]::GetForegroundWindow() }
+    if ($h -eq [IntPtr]::Zero) { return $false }
     [uint32]$owner = 0; [void][Glance.Native]::GetWindowThreadProcessId($h, [ref]$owner)
     if ($owner -eq $PID) { return $false }
     if ([Glance.Native]::ClassOf($h) -in 'Progman','WorkerW','Shell_TrayWnd','Shell_SecondaryTrayWnd','Windows.UI.Core.CoreWindow') { return $false }
     $r = New-Object Glance.Native+RECT; if (-not [Glance.Native]::GetWindowRect($h, [ref]$r)) { return $false }
-    $b = [System.Windows.Forms.Screen]::FromHandle($h).Bounds
-    ($r.Left -le $b.Left) -and ($r.Top -le $b.Top) -and ($r.Right -ge $b.Right) -and ($r.Bottom -ge $b.Bottom)
+    # A maximized window with an auto-hidden taskbar also covers the whole monitor; real full-screen windows drop their caption.
+    if (([Glance.Native]::GetStyle($h) -band 0x00C00000) -eq 0x00C00000) { return $false }
+    $scr = [System.Windows.Forms.Screen]::FromHandle($h); $b = $scr.Bounds
+    $covers = ($r.Left -le $b.Left) -and ($r.Top -le $b.Top) -and ($r.Right -ge $b.Right) -and ($r.Bottom -ge $b.Bottom)
+    # A game on the other monitor should not hide an overlay that lives on this one.
+    $covers -and ($scr.DeviceName -eq (Get-OverlayScreen).DeviceName)
 }
 function Update-FullscreenHide {
     if (-not $script:Settings.HideFullscreen) { return }
@@ -1505,7 +1517,7 @@ function New-SettingsWindow {
     $sec.Children.Add((New-SettingRow 'Monitor' 'Which display the preset positions refer to.' $script:MonitorHost $true)) | Out-Null
     $p.Children.Add($sec) | Out-Null
     $sec = New-Section 'Behaviour'
-    $sec.Children.Add((New-Switch 'HideFullscreen' 'Hide over full-screen apps' 'Hides the overlay while a game or video fills the screen and brings it back afterwards.')) | Out-Null
+    $sec.Children.Add((New-Switch 'HideFullscreen' 'Hide over full-screen apps' 'Hides the overlay while a game or video fills the monitor it sits on, and brings it back afterwards. Full-screen apps on other monitors are ignored.')) | Out-Null
     $sec.Children.Add((New-HotkeyRow)) | Out-Null
     $p.Children.Add($sec) | Out-Null
     $sec = New-Section 'Sampling'
