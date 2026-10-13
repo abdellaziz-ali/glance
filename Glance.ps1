@@ -12,7 +12,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$Version  = '2.3'
+$Version  = '2.4'
 $Headless = $env:GLANCE_HEADLESS -eq '1'
 $ShotDir  = $env:GLANCE_SHOT
 $AppExe   = [string]$AppExe                                   # set by the .exe host; empty when run as a script

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.4 — 2026-10-14
 
 - **Updates** — Settings → About checks GitHub Releases (automatically once a day, or *Check now*), shows a tray notification when a newer version exists, and installs it on request. Downloads are verified against the release's `SHA256SUMS.txt`; portable copies replace themselves in place, installed copies run the setup silently. *Skip this version* and an off switch are available.
 - Hide over full-screen apps now only reacts to full-screen windows on the monitor the overlay sits on; a game on another display leaves it visible. Maximized windows with a title bar are no longer mistaken for full-screen.
