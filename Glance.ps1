@@ -82,6 +82,7 @@ $Defaults = @{
     SchemaVersion = $SchemaVersion
     Mode = 'Panel'; Anchor = 'TopRight'; PanelLeft = $null; PanelTop = $null; BarLeft = $null; BarTop = $null; BarOrientation = 'Horizontal'; BarCompact = $false
     Monitor = ''; HideFullscreen = $false; Hotkey = ''
+    CheckUpdates = $true; LastUpdateCheck = ''; SkipVersion = ''
     BgAlpha = 0.92; Scale = 1.0; TextScale = 1.0; Accent = 'Amber'; ClickThrough = $false; ShowHeader = $true
     ShowSparklines = $true; ShowBars = $true; Interval = 1000
     ShowCpu = $true; ShowRam = $true; ShowGpu = $true; ShowNet = $true; ShowDisk = $true
@@ -1440,6 +1441,146 @@ function Update-FullscreenHide {
     if ($fs -and $win.IsVisible) { $win.Hide(); $script:AutoHidden = $true }
     elseif (-not $fs -and $script:AutoHidden) { $script:AutoHidden = $false; $win.Show(); Assert-Topmost }
 }
+
+# ---------------------------------------------------------------- updates (GitHub Releases)
+$UpdateRepo = 'abdellaziz-ali/glance'
+$script:Jobs = New-Object System.Collections.ArrayList
+# Runs script text in its own runspace; $onDone receives the output on the UI thread from the tick.
+function Start-Async([string]$code, [hashtable]$params, [scriptblock]$onDone) {
+    $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+    $ps = [powershell]::Create(); $ps.Runspace = $rs
+    [void]$ps.AddScript($code); if ($params) { [void]$ps.AddParameters($params) }
+    [void]$script:Jobs.Add(@{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke(); Done = $onDone })
+}
+function Update-AsyncJobs {
+    foreach ($j in @($script:Jobs)) {
+        if (-not $j.Handle.IsCompleted) { continue }
+        $script:Jobs.Remove($j)
+        $out = $null
+        try { $out = @($j.PS.EndInvoke($j.Handle)) | Select-Object -Last 1 } catch { $out = @{ Error = $_.Exception.Message } }
+        try { $j.PS.Dispose(); $j.RS.Close(); $j.RS.Dispose() } catch {}
+        if ($null -eq $out) { $out = @{ Error = 'no result' } }
+        try { & $j.Done $out } catch { Write-ErrorLog "async: $_" }
+    }
+}
+function ConvertTo-Version([string]$s) {
+    $s = ($s -replace '^[vV]', '') -split '[-+ ]' | Select-Object -First 1
+    $parts = @($s -split '\.' | Where-Object { $_ -match '^\d+$' })
+    while ($parts.Count -lt 2) { $parts += '0' }
+    try { [version]($parts -join '.') } catch { $null }
+}
+function Test-NewerVersion([string]$remote, [string]$local) { $a = ConvertTo-Version $remote; $b = ConvertTo-Version $local; [bool]($a -and $b -and $a -gt $b) }
+
+$script:Update = @{ Status = 'idle'; Info = $null; Error = ''; Notified = '' }
+$UpdateCheckCode = @'
+param($Repo)
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $wc = New-Object System.Net.WebClient
+    $wc.Headers['User-Agent'] = 'Glance-Updater'; $wc.Headers['Accept'] = 'application/vnd.github+json'
+    $r = $wc.DownloadString("https://api.github.com/repos/$Repo/releases/latest") | ConvertFrom-Json
+    @{ Tag = [string]$r.tag_name; Version = ([string]$r.tag_name) -replace '^[vV]', ''; Url = [string]$r.html_url; Notes = [string]$r.body; Assets = @($r.assets | ForEach-Object { [string]$_.name }) }
+} catch { @{ Error = $_.Exception.Message } }
+'@
+# Downloads one release asset and refuses it unless SHA256SUMS.txt from the same release vouches for it.
+$UpdateDownloadCode = @'
+param($Repo, $Tag, $Asset, $Dir)
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $wc = New-Object System.Net.WebClient; $wc.Headers['User-Agent'] = 'Glance-Updater'
+    $base = "https://github.com/$Repo/releases/download/$Tag/"
+    $sums = @{}
+    try { foreach ($line in ($wc.DownloadString($base + 'SHA256SUMS.txt') -split "`r?`n")) { if ($line -match '^([0-9A-Fa-f]{64})\s+\*?(\S.*?)\s*$') { $sums[$Matches[2]] = $Matches[1].ToLowerInvariant() } } }
+    catch { return @{ Error = 'This release has no SHA256SUMS.txt, so the download cannot be verified. Use the release page instead.' } }
+    if (-not $sums.ContainsKey($Asset)) { return @{ Error = "SHA256SUMS.txt does not list $Asset." } }
+    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    $file = Join-Path $Dir $Asset
+    $wc.DownloadFile($base + $Asset, $file)
+    $hash = (Get-FileHash -Path $file -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($hash -ne $sums[$Asset]) { Remove-Item $file -Force -ErrorAction SilentlyContinue; return @{ Error = 'Checksum mismatch - the download was discarded.' } }
+    Unblock-File $file -ErrorAction SilentlyContinue
+    @{ File = $file }
+} catch { @{ Error = $_.Exception.Message } }
+'@
+function Start-UpdateCheck([switch]$Manual) {
+    if ($script:Update.Status -in 'checking','downloading') { return }
+    $script:Update.Status = 'checking'; $script:Update.Error = ''; Update-UpdateUI
+    Start-Async $UpdateCheckCode @{ Repo = $UpdateRepo } {
+        param($r)
+        $script:Settings.LastUpdateCheck = (Get-Date).ToString('o'); Request-Save
+        if ($r.Error) { $script:Update.Status = 'error'; $script:Update.Error = $r.Error; Write-ErrorLog "update check: $($r.Error)" -Once }
+        elseif (Test-NewerVersion $r.Version $Version) {
+            $script:Update.Status = 'available'; $script:Update.Info = $r
+            $skipped = [string]$script:Settings.SkipVersion -eq $r.Version
+            if (-not $skipped -and $script:Update.Notified -ne $r.Version -and -not $Headless) {
+                $script:Update.Notified = $r.Version
+                $tray.BalloonTipTitle = "Glance $($r.Version) is available"; $tray.BalloonTipText = 'Click to see what is new and install it.'
+                $tray.ShowBalloonTip(10000)
+            }
+        } else { $script:Update.Status = 'none'; $script:Update.Info = $r }
+        Update-UpdateUI
+    }
+}
+function Get-UpdateAsset { if (-not $AppExe) { '' } elseif ($Portable) { 'Glance.exe' } else { 'Glance-Setup.exe' } }
+function Start-UpdateInstall {
+    $i = $script:Update.Info; if (-not $i -or $script:Update.Status -ne 'available') { return }
+    $asset = Get-UpdateAsset
+    if (-not $asset) { Start-Process $i.Url; return }                       # script mode: nothing to replace
+    $script:Update.Status = 'downloading'; Update-UpdateUI
+    Start-Async $UpdateDownloadCode @{ Repo = $UpdateRepo; Tag = $i.Tag; Asset = $asset; Dir = (Join-Path $DataDir 'update') } {
+        param($r)
+        if ($r.Error) { $script:Update.Status = 'available'; $script:Update.Error = $r.Error; Write-ErrorLog "update download: $($r.Error)"; Update-UpdateUI; return }
+        try {
+            if ($Portable) {
+                # A running exe can be renamed but not overwritten; the new instance removes the leftover.
+                $old = "$AppExe.old"; Remove-Item $old -Force -ErrorAction SilentlyContinue
+                Move-Item $AppExe $old -Force; Copy-Item $r.File $AppExe -Force
+                $startupArgs = @{ FilePath = $AppExe; WorkingDirectory = $AppDir }
+            } else {
+                $startupArgs = @{ FilePath = $r.File; ArgumentList = '/S' }
+            }
+            Save-Settings; Start-Process @startupArgs; Stop-App
+        } catch { $script:Update.Status = 'available'; $script:Update.Error = "Install failed: $_"; Write-ErrorLog $script:Update.Error; Update-UpdateUI }
+    }
+}
+function Update-UpdateUI {
+    if ($script:miUpdate) { $script:miUpdate.Visible = ($script:Update.Status -eq 'available'); if ($script:Update.Info) { $script:miUpdate.Text = "Update to $($script:Update.Info.Version)..." } }
+    if (-not $script:UpdStatus) { return }
+    $u = $script:Update; $v = if ($u.Info) { $u.Info.Version } else { '' }
+    $script:UpdStatus.Text = switch ($u.Status) {
+        'idle'        { if ($script:Settings.LastUpdateCheck) { 'Last checked ' + ([datetime]$script:Settings.LastUpdateCheck).ToString('g') } else { 'Not checked yet.' } }
+        'checking'    { 'Checking GitHub...' }
+        'none'        { "You have the latest version ($Version)." }
+        'available'   { if ($u.Error) { "Version $v is available. $($u.Error)" } else { "Version $v is available." } }
+        'downloading' { "Downloading $v and verifying its checksum..." }
+        'error'       { "Could not check for updates: $($u.Error)" }
+    }
+    $script:UpdStatus.Foreground = if ($u.Status -eq 'available') { Brush (Accent-Hex) } else { $Palette.Dim }
+    $avail = $u.Status -eq 'available'
+    $script:UpdInstall.Visibility = if ($avail) { 'Visible' } else { 'Collapsed' }
+    $script:UpdInstall.Content = if (-not (Get-UpdateAsset)) { 'Open download page' } else { "Install $v" }
+    $script:UpdNotes.Visibility = if ($u.Info -and $u.Info.Url) { 'Visible' } else { 'Collapsed' }
+    $script:UpdSkip.Visibility = if ($avail -and [string]$script:Settings.SkipVersion -ne $v) { 'Visible' } else { 'Collapsed' }
+    $script:UpdCheck.IsEnabled = $u.Status -notin 'checking','downloading'
+}
+function New-UpdateRow {
+    $sp = New-Object System.Windows.Controls.StackPanel
+    $script:UpdStatus = New-Text 'Not checked yet.' 12.5 $Palette.Dim; $script:UpdStatus.Margin = Thick 0 0 0 10
+    $btns = New-Object System.Windows.Controls.WrapPanel
+    $mk = { param($txt, $click) $b = New-Object System.Windows.Controls.Button; $b.Content = $txt; $b.Style = $script:Set.Resources['Btn']; $b.Margin = Thick 0 0 8 6; $b.Add_Click($click); $btns.Children.Add($b) | Out-Null; $b }
+    $script:UpdCheck   = & $mk 'Check now' { Start-UpdateCheck -Manual }
+    $script:UpdInstall = & $mk 'Install' { Start-UpdateInstall }
+    $script:UpdNotes   = & $mk 'Release notes' { if ($script:Update.Info) { Start-Process $script:Update.Info.Url } }
+    $script:UpdSkip    = & $mk 'Skip this version' { if ($script:Update.Info) { $script:Settings.SkipVersion = $script:Update.Info.Version; Request-Save; Update-UpdateUI } }
+    $sp.Children.Add($script:UpdStatus) | Out-Null; $sp.Children.Add($btns) | Out-Null
+    Update-UpdateUI
+    New-SettingRow 'Updates' "Releases are published on GitHub ($UpdateRepo). Downloads are verified against the release's SHA256SUMS.txt before anything is replaced." $sp $true
+}
+function Update-AutoCheck {
+    if (-not $script:Settings.CheckUpdates -or $Headless) { return }
+    $last = $null; try { if ($script:Settings.LastUpdateCheck) { $last = [datetime]$script:Settings.LastUpdateCheck } } catch {}
+    if (-not $last -or ((Get-Date) - $last).TotalHours -ge 20) { Start-UpdateCheck }
+}
 $saveTimer = New-Object System.Windows.Threading.DispatcherTimer
 $saveTimer.Interval = [TimeSpan]::FromMilliseconds(600)
 $saveTimer.Add_Tick({ $saveTimer.Stop(); Save-Settings })
@@ -1597,6 +1738,10 @@ function New-SettingsWindow {
     if ($Portable) { $pt = New-Text 'Portable mode: settings live in the data folder next to the executable.' 12 $Palette.Dim; $pt.Margin = Thick 0 6 0 0; $about.Children.Add($pt) | Out-Null }
     $sec.Children.Add($about) | Out-Null
     $p.Children.Add($sec) | Out-Null
+    $sec = New-Section 'Updates'
+    $sec.Children.Add((New-UpdateRow)) | Out-Null
+    $sec.Children.Add((New-Switch 'CheckUpdates' 'Check automatically' 'Looks up the latest release once a day and shows a tray notification when there is a newer one. Nothing is installed without you clicking Install.')) | Out-Null
+    $p.Children.Add($sec) | Out-Null
     $sec = New-Section 'Files'
     $sec.Children.Add((New-ButtonRow 'Settings folder' $DataDir 'Open' { Start-Process explorer.exe -ArgumentList "`"$DataDir`"" })) | Out-Null
     $sec.Children.Add((New-ButtonRow $(if ($AppExe) { 'Install location' } else { 'Script location' }) $AppDir 'Open' { Start-Process explorer.exe -ArgumentList "`"$AppDir`"" })) | Out-Null
@@ -1687,8 +1832,10 @@ foreach ($k in $AnchorNames.Keys) {
     $mi.Tag = $k; [void]$miPos.DropDownItems.Add($mi)
 }
 $miExit     = New-MenuItem 'Exit'            { Stop-App }
+$script:miUpdate = New-MenuItem 'Update...'  { Show-Settings; Show-SettingsPage 'About' }
+$script:miUpdate.Visible = $false; $script:miUpdate.Font = New-Object System.Drawing.Font($menu.Font, [System.Drawing.FontStyle]::Bold)
 $miSettings.Font = New-Object System.Drawing.Font($menu.Font, [System.Drawing.FontStyle]::Bold)
-foreach ($item in @($miShow, $miSettings, '-', $miPanel, $miBar, $miVBar, $miPos, $miClick, '-', $miExit)) {
+foreach ($item in @($miShow, $miSettings, $script:miUpdate, '-', $miPanel, $miBar, $miVBar, $miPos, $miClick, '-', $miExit)) {
     if ($item -eq '-') { [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) } else { [void]$menu.Items.Add($item) }
 }
 $menu.Add_Opening({
@@ -1705,6 +1852,7 @@ $tray.Icon = New-TrayIcon; $tray.Text = 'Glance'; $tray.ContextMenuStrip = $menu
 $tray.Visible = -not $Headless
 $tray.Add_MouseClick({ param($sender, $e) if ($e.Button -eq 'Left') { Toggle-Visible } })
 $tray.Add_DoubleClick({ Show-Settings })
+$tray.Add_BalloonTipClicked({ Show-Settings; Show-SettingsPage 'About' })
 function Show-Menu {
     # NotifyIcon's own routine handles focus so the menu closes when clicking elsewhere.
     try { $tray.GetType().GetMethod('ShowContextMenu', [System.Reflection.BindingFlags]'NonPublic,Instance').Invoke($tray, $null) | Out-Null }
@@ -1724,6 +1872,7 @@ function Stop-App {
     $script:Quitting = $true; $sync.Run = $false
     try { $timer.Stop(); $saveTimer.Stop() } catch {}
     try { if ($script:HotKeyWin) { $script:HotKeyWin.Dispose() } } catch {}
+    foreach ($j in @($script:Jobs)) { try { $j.PS.Stop(); $j.PS.Dispose(); $j.RS.Dispose() } catch {} }
     try { $tray.Visible = $false; $tray.Dispose() } catch {}
     Save-Settings
     try { if ($script:Set) { $script:Set.Close() } } catch {}
@@ -1742,6 +1891,8 @@ $timer.Add_Tick({
             $tray.Text = $txt
         }
         $script:TickN++
+        Update-AsyncJobs
+        if ($script:TickN -eq 80 -or $script:TickN % 14400 -eq 0) { Update-AutoCheck }   # ~20 s after start, then hourly
         if ($script:DisksDirty -and $script:Set -and $script:Set.IsVisible) { Build-DiskChips }
         if ($script:TickN % 4 -eq 0) { Update-FullscreenHide }
         if ($script:TickN % 12 -eq 0 -and $win.IsVisible) { Assert-Topmost }
@@ -1769,6 +1920,8 @@ Apply-Appearance
 Apply-Mode
 Apply-Colors
 if (-not $Headless) { Apply-Hotkey }
+# Portable self-update leaves the previous exe behind; it can be deleted once we are the running copy.
+if ($AppExe -and (Test-Path "$AppExe.old")) { try { Remove-Item "$AppExe.old" -Force } catch {} }
 
 # ---------------------------------------------------------------- headless smoke test / screenshots
 function Save-WindowShot($w, [string]$path) {
@@ -1809,6 +1962,10 @@ if ($Headless) {
         $script:Settings = $saved; Refresh-SettingsUI; Apply-Appearance; Apply-Mode; Apply-Order; Apply-Visibility; Apply-Colors
         $sync.WantCores = [bool]$saved.ShowCores; $sync.WantEngines = [bool]$saved.ShowGpuEngines; $sync.WantAdapter = [bool]$saved.ShowAdapter
         Write-Output ('reset    : ok ({0} keys, {1} metrics)' -f $Defaults.Count, $MetricDefs.Count)
+        foreach ($c in @(@('v2.4','2.3',$true), @('2.10','2.9',$true), @('v2.3','2.3',$false), @('2.2','2.3',$false), @('v3.0-beta','2.3',$true), @('junk','2.3',$false))) {
+            if ((Test-NewerVersion $c[0] $c[1]) -ne $c[2]) { throw "version compare failed for $($c[0]) vs $($c[1])" }
+        }
+        Write-Output 'update   : version compare ok'
         if ($ShotDir) {
             New-Item -ItemType Directory -Force -Path $ShotDir | Out-Null
             $win.Add_Loaded({ Apply-Position; $timer.Start() })

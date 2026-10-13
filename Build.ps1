@@ -124,3 +124,9 @@ Remove-Item $exePath -Force -ErrorAction SilentlyContinue
 Invoke-Csc $csPath $exePath (Join-Path $Root 'installer\SetupStub.manifest') @('System.Windows.Forms.dll') $res
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ("  {0}  ({1:N0} KB)" -f $exePath, ((Get-Item $exePath).Length / 1KB))
+
+# The in-app updater refuses any download that this file does not vouch for; ship it with every release.
+$sumsPath = Join-Path $Dist 'SHA256SUMS.txt'
+$lines = foreach ($f in 'Glance-Setup.exe', 'Glance-Setup.cmd', 'Glance.exe') { '{0} *{1}' -f (Get-FileHash (Join-Path $Dist $f) -Algorithm SHA256).Hash.ToLowerInvariant(), $f }
+[IO.File]::WriteAllText($sumsPath, ($lines -join "`n") + "`n", [Text.Encoding]::ASCII)
+Write-Host "  $sumsPath"

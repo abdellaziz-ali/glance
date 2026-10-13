@@ -31,6 +31,7 @@
 | **Proper settings window** | Everything above plus startup, refresh interval, which network adapter to measure, bytes or bits. Changes apply instantly |
 | **Tray icon** | Left-click to show/hide, double-click for settings, right-click for the menu; tooltip shows current speeds |
 | **Zero footprint** | Per-user install in `%LocalAppData%`, listed in *Apps & Features*, clean uninstall. Nothing else is installed. Drop a file named `portable` next to the exe to keep settings beside it |
+| **Stays current** | Checks GitHub Releases once a day (can be turned off) and offers one-click install; every download is checked against the release's `SHA256SUMS.txt` first |
 
 ## Screenshots
 
@@ -81,6 +82,7 @@ Uninstall from **Settings → Apps**, from Glance's own **Settings → About →
 | Change layout / position / click-through | Tray menu, or Settings → General |
 | Reorder or hide metrics, set alert limits | Settings → Metrics |
 | Icons, colours, text size | Settings → Appearance |
+| Update | Settings → About (automatic daily check, tray notification when a release is newer) |
 | Quit | Tray menu → *Exit* |
 
 Settings live in `%AppData%\Glance\settings.json` and apply instantly. With a file named `portable` next to `Glance.exe` they live in `data\` beside it instead. A row showing a small warning icon means that metric's counter failed - hover it for the reason; details are in `error.log` in the same folder.

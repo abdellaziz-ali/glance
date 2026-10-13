@@ -58,6 +58,12 @@ Installer round-trip:
 & "$env:LOCALAPPDATA\Programs\Glance\Uninstall.cmd" /S
 ```
 
+Publishing a release: tag `vX.Y`, then attach **all four** files from `dist\` — `Glance-Setup.exe`, `Glance-Setup.cmd`, `Glance.exe` and `SHA256SUMS.txt`. The in-app updater downloads `SHA256SUMS.txt` from the same release and refuses an asset whose hash is missing or different, so a release without it can be seen but not installed from inside the app.
+
+```powershell
+gh release create vX.Y dist\Glance-Setup.exe dist\Glance-Setup.cmd dist\Glance.exe dist\SHA256SUMS.txt --title "Glance X.Y" --notes-file notes.md
+```
+
 What the installer touches: `%LocalAppData%\Programs\Glance\`, `Glance.lnk` in the Start Menu and (optionally) the Startup folder, and `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Glance`. Nothing system-wide.
 
 ## Architecture notes
@@ -68,6 +74,7 @@ What the installer touches: `%LocalAppData%\Programs\Glance\`, `Glance.lnk` in t
 - **Settings.** A flat hashtable serialised with `ConvertTo-Json`, written atomically (temp file + move). `SchemaVersion` is bumped whenever the shape changes; `$Migrations[n]` upgrades a file from version *n* to *n+1* and they run in sequence, so a 2.0 file passes through every step. List-valued keys (`Disks`, `Order`) and map-valued keys (`Colors`, `Icons`, `IconColors`, `Alerts`) are rebuilt as real arrays/hashtables on load because `ConvertFrom-Json` yields `PSCustomObject`s. A file named `portable` next to the exe/script moves the data folder to `data\` beside it.
 - **Metrics window.** Rows are declared once in `$MetricDefs` (id, Show* key, label, owned rows); `Order` stores metric ids and `Apply-Order` re-parents the row grids. Optional readouts (cores, GPU engines, adapter) are only sampled when their `$sync.Want*` flag is on.
 - **Hotkey.** `Glance.HotKeyWindow` (a WinForms `NativeWindow` compiled with `Add-Type`) owns the `RegisterHotKey` call and raises `Pressed` from its `WndProc`; the overlay window itself has no message hook. Full-screen detection compares the foreground window rect with its monitor bounds every second.
+- **Updates.** `Start-Async` runs plain script text in a throwaway runspace and the 250 ms tick collects finished jobs (`Update-AsyncJobs`), so the UI never blocks on the network. The check hits `api.github.com/repos/<repo>/releases/latest`; the install step builds the asset URL from repo + tag (never from the API response), verifies it against `SHA256SUMS.txt`, then either runs `Glance-Setup.exe /S` (installed) or renames the running exe aside and copies the new one in (portable).
 - **Host.** `src\Host.cs` creates a runspace with `UseCurrentThread` on an `[STAThread]` `Main`, so `Application.Run` blocks the main thread as WPF expects. Script errors are logged to `%AppData%\Glance\error.log` and surfaced in a dialog.
 - **Why not IExpress?** It was tried for the installer exe; Defender flags its output (`Program:Win32/Contebrew.A!ml`). A compiled stub has no such problem.
 
